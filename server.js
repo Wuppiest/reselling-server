@@ -5,7 +5,8 @@ const PORT = process.env.PORT || 3000;
 const WRITE_KEY = process.env.WRITE_KEY || "", READ_KEY = process.env.READ_KEY || "";
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, "data");
 const FILE = path.join(DATA_DIR, "items.json"), PUB = path.join(__dirname, "public");
-if (!WRITE_KEY || !READ_KEY) { console.error("WRITE_KEY und READ_KEY müssen gesetzt sein."); process.exit(1); }
+const OPEN = process.env.OPEN_ACCESS === "1"; // 1 = kein Zugangscode nötig
+if (!OPEN && (!WRITE_KEY || !READ_KEY)) { console.error("WRITE_KEY und READ_KEY müssen gesetzt sein."); process.exit(1); }
 
 /* ---------- Speicher (JSON-Datei) ---------- */
 let db = { rev: 0, items: {} };
@@ -24,7 +25,7 @@ process.on("SIGTERM", () => { try { fs.writeFileSync(FILE, JSON.stringify(db)); 
 
 /* ---------- Zugang ---------- */
 const eq = (a, b) => { const x = Buffer.from(String(a)), y = Buffer.from(String(b)); return x.length === y.length && crypto.timingSafeEqual(x, y); };
-const role = req => { const k = req.headers["x-api-key"] || ""; return eq(k, WRITE_KEY) ? "write" : eq(k, READ_KEY) ? "read" : null; };
+const role = req => { if (OPEN) return "write"; const k = req.headers["x-api-key"] || ""; return eq(k, WRITE_KEY) ? "write" : eq(k, READ_KEY) ? "read" : null; };
 
 /* ---------- Prüfung ---------- */
 const NUMS = ["min", "max", "on", "buy", "sold", "sp", "ship", "g"], STAT = ["Offen", "Online", "Verkauft"];
@@ -37,6 +38,10 @@ function clean(code, b) {
 }
 
 /* ---------- HTTP ---------- */
+// Komfort-Link: ?k=CODE in der Adresse wird im Browser gespeichert, dann fragt die Seite nicht mehr nach dem Code
+const inject = f => '<script>try{' + (OPEN
+  ? 'localStorage.setItem("rs_key","open");localStorage.setItem("rs_read_key","open")'
+  : 'var q=new URLSearchParams(location.search).get("k");if(q)localStorage.setItem("' + (f === "dashboard.html" ? "rs_read_key" : "rs_key") + '",q)') + '}catch(e){}</script>';
 const MIME = { ".html": "text/html; charset=utf-8", ".js": "text/javascript", ".css": "text/css", ".png": "image/png", ".svg": "image/svg+xml", ".ico": "image/x-icon" };
 function send(res, code, obj) {
   res.writeHead(code, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
@@ -51,6 +56,7 @@ const readBody = req => new Promise((ok, no) => {
 http.createServer(async (req, res) => {
   const u = new URL(req.url, "http://x"), p = u.pathname;
   res.setHeader("x-content-type-options", "nosniff");
+  res.setHeader("x-robots-tag", "noindex, nofollow");
   try {
     if (p === "/health") return send(res, 200, { ok: true });
 
@@ -81,7 +87,7 @@ http.createServer(async (req, res) => {
     fs.readFile(fp, (err, buf) => {
       if (err) { res.writeHead(404); return res.end("Nicht gefunden"); }
       res.writeHead(200, { "content-type": MIME[path.extname(fp)] || "application/octet-stream" });
-      res.end(buf);
+      res.end(path.extname(fp) === ".html" ? buf.toString("utf8").replace("<head>", "<head>" + inject(file)) : buf);
     });
   } catch (e) { send(res, 400, { error: "Anfrage fehlerhaft" }); }
 }).listen(PORT, () => console.log("Server läuft auf Port " + PORT));
