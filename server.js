@@ -8,20 +8,32 @@ const FILE = path.join(DATA_DIR, "items.json"), PUB = path.join(__dirname, "publ
 const OPEN = process.env.OPEN_ACCESS === "1"; // 1 = kein Zugangscode nötig
 if (!OPEN && (!WRITE_KEY || !READ_KEY)) { console.error("WRITE_KEY und READ_KEY müssen gesetzt sein."); process.exit(1); }
 
-/* ---------- Speicher (JSON-Datei) ---------- */
-let db = { rev: 0, items: {} };
-fs.mkdirSync(DATA_DIR, { recursive: true });
-try { db = JSON.parse(fs.readFileSync(FILE, "utf8")); } catch (e) {}
-let timer = null;
-function save() {
-  db.rev++;
-  clearTimeout(timer);
-  timer = setTimeout(() => {
-    const tmp = FILE + ".tmp";
-    fs.writeFile(tmp, JSON.stringify(db), err => err ? console.error(err) : fs.rename(tmp, FILE, e => e && console.error(e)));
-  }, 300);
+/* ---------- Speicher: Postgres (DATABASE_URL) oder JSON-Datei ---------- */
+const db = { rev: Date.now(), items: {} };
+let store;
+if (process.env.DATABASE_URL) {
+  const { Pool } = require("pg");
+  const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } });
+  store = {
+    ready: pool.query("CREATE TABLE IF NOT EXISTS items (code text PRIMARY KEY, data jsonb NOT NULL)")
+      .then(() => pool.query("SELECT data FROM items")).then(r => r.rows.forEach(x => { db.items[x.data.code] = x.data; })),
+    put: async o => { await pool.query("INSERT INTO items (code, data) VALUES ($1, $2) ON CONFLICT (code) DO UPDATE SET data = $2", [o.code, o]); db.items[o.code] = o; db.rev++; },
+    del: async code => { await pool.query("DELETE FROM items WHERE code = $1", [code]); delete db.items[code]; db.rev++; }
+  };
+} else {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  try { db.items = JSON.parse(fs.readFileSync(FILE, "utf8")).items || {}; } catch (e) {}
+  let timer = null;
+  const save = () => {
+    db.rev++; clearTimeout(timer);
+    timer = setTimeout(() => {
+      const tmp = FILE + ".tmp";
+      fs.writeFile(tmp, JSON.stringify(db), err => err ? console.error(err) : fs.rename(tmp, FILE, e => e && console.error(e)));
+    }, 300);
+  };
+  process.on("SIGTERM", () => { try { fs.writeFileSync(FILE, JSON.stringify(db)); } catch (e) {} process.exit(0); });
+  store = { ready: Promise.resolve(), put: async o => { db.items[o.code] = o; save(); }, del: async code => { delete db.items[code]; save(); } };
 }
-process.on("SIGTERM", () => { try { fs.writeFileSync(FILE, JSON.stringify(db)); } catch (e) {} process.exit(0); });
 
 /* ---------- Zugang ---------- */
 const eq = (a, b) => { const x = Buffer.from(String(a)), y = Buffer.from(String(b)); return x.length === y.length && crypto.timingSafeEqual(x, y); };
@@ -53,7 +65,7 @@ const readBody = req => new Promise((ok, no) => {
   req.on("end", () => ok(s)); req.on("error", no);
 });
 
-http.createServer(async (req, res) => {
+const server = http.createServer(async (req, res) => {
   const u = new URL(req.url, "http://x"), p = u.pathname;
   res.setHeader("x-content-type-options", "nosniff");
   res.setHeader("x-robots-tag", "noindex, nofollow");
@@ -74,9 +86,9 @@ http.createServer(async (req, res) => {
         if (req.method === "PUT") {
           const o = clean(code, JSON.parse(await readBody(req)));
           if (!o) return send(res, 400, { error: "Ungültige Daten" });
-          db.items[code] = o; save(); return send(res, 200, { ok: true });
+          await store.put(o); return send(res, 200, { ok: true, updated: o.updated });
         }
-        if (req.method === "DELETE") { delete db.items[code]; save(); return send(res, 200, { ok: true }); }
+        if (req.method === "DELETE") { await store.del(code); return send(res, 200, { ok: true }); }
       }
       return send(res, 404, { error: "Nicht gefunden" });
     }
@@ -89,5 +101,6 @@ http.createServer(async (req, res) => {
       res.writeHead(200, { "content-type": MIME[path.extname(fp)] || "application/octet-stream" });
       res.end(path.extname(fp) === ".html" ? buf.toString("utf8").replace("<head>", "<head>" + inject(file)) : buf);
     });
-  } catch (e) { send(res, 400, { error: "Anfrage fehlerhaft" }); }
-}).listen(PORT, () => console.log("Server läuft auf Port " + PORT));
+  } catch (e) { console.error(e.message); send(res, e instanceof SyntaxError ? 400 : 500, { error: "Anfrage fehlerhaft" }); }
+});
+store.ready.then(() => server.listen(PORT, () => console.log("Server läuft auf Port " + PORT))).catch(e => { console.error("Start fehlgeschlagen:", e.message); process.exit(1); });
