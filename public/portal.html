@@ -356,9 +356,9 @@ function body(i, c) {
 }
 function enqueue(i, c) { Q[i.code] = { op: "put", b: body(i, c) }; saveQ(); flush(); }
 function enqueueDel(code) { Q[code] = { op: "del" }; saveQ(); flush(); }
-function syncAll() {
+function syncAll(remote) {
   for (const i of S.items) {
-    if (Q[i.code]) continue;
+    if (Q[i.code] || (remote && remote.has(i.code))) continue;
     const c = check(i);
     if (!Object.keys(c.err).length) Q[i.code] = { op: "put", b: body(i, c) };
     else if (!i.saved) Q[i.code] = { op: "put", b: body(i, null) };
@@ -383,7 +383,7 @@ async function flush() {
       if (res.status === 401 || res.status === 403) { localStorage.removeItem(KK); noKey = false; syncErr = "Zugangscode falsch"; break; }
       if (res.status >= 500) throw new Error("server");
       if (res.status === 400) syncErr = code + " wurde abgelehnt";
-      else okAt = Date.now();
+      else { okAt = Date.now(); if (q.op === "put") { const j = await res.json().catch(() => ({})), it = S.items.find(x => x.code === code); if (it && j.updated) { it.rup = j.updated; persist(); } } }
       if (Q[code] === q) delete Q[code];
       saveQ();
     }
@@ -391,7 +391,35 @@ async function flush() {
   busy = false; paint();
 }
 
-renderForm(); syncAll(); setInterval(flush, 20000);
+/* ---------- Aufträge vom Server holen ---------- */
+const dstr = ms => { const d = new Date(ms); return d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate()); };
+const tstr = ms => { const d = new Date(ms); return pad(d.getHours()) + ":" + pad(d.getMinutes()); };
+function fromServer(o) {
+  const f = v => v == null ? "" : String(v).replace(".", ","), m = v => v == null ? "" : v.toFixed(2).replace(".", ",");
+  const i = { code: o.code, min: f(o.min), max: f(o.max), rup: o.updated, saved: o.text || "", savedAt: tstr(o.updated) + " am " + Number(dstr(o.updated).slice(8)) + "." + Number(dstr(o.updated).slice(5, 7)) + "." + dstr(o.updated).slice(0, 4) };
+  if (o.on != null) { i.onDate = dstr(o.on); i.onTime = tstr(o.on); i.buy = m(o.buy); i.codeOk = o.desc === true; }
+  if (o.sold != null) { i.soldOpen = true; i.sDate = dstr(o.sold); i.sTime = tstr(o.sold); i.sPrice = m(o.sp); i.ship = m(o.ship); }
+  return i;
+}
+async function pull() {
+  const key = localStorage.getItem(KK) || ""; if (!key) return;
+  try {
+    const r = await fetch("/api/items?rev=-1", { headers: { "x-api-key": key }, cache: "no-store" });
+    if (!r.ok) return;
+    const d = await r.json(), here = cur() && cur().code, remote = new Set(); let ch = false;
+    for (const o of d.items) {
+      remote.add(o.code);
+      const k = S.items.findIndex(x => x.code === o.code);
+      if (k < 0) { S.items.unshift(fromServer(o)); ch = true; }
+      else if (!Q[o.code] && o.code !== here && o.updated > (S.items[k].rup || 0)) { S.items[k] = fromServer(o); ch = true; }
+    }
+    S.cur = S.items.findIndex(x => x.code === here);
+    syncAll(remote);
+    if (ch) { persist(); renderList(); }
+  } catch (e) {}
+}
+
+renderForm(); pull(); setInterval(flush, 20000); setInterval(pull, 30000);
 </script>
 </body>
 </html>
