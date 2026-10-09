@@ -1,0 +1,9 @@
+{
+  "name": "brotfund-server",
+  "version": "2.0.0",
+  "private": true,
+  "description": "BrotFund: eine Seite, Abgleich über Render, Speicherung in einem GitHub-Gist",
+  "main": "server.js",
+  "scripts": { "start": "node server.js" },
+  "engines": { "node": ">=18" }
+}
