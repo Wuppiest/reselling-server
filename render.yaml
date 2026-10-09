@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: reselling-server
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: GITHUB_TOKEN   # Token mit Berechtigung "gist"
+        sync: false
+      - key: GIST_ID        # ID des geheimen Gists mit der Datei daten.json
+        sync: false
+      - key: TZ
+        value: Europe/Berlin
+      - key: NODE_VERSION
+        value: "20"
